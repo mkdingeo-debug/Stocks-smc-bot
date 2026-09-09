@@ -162,6 +162,52 @@ DEPLOY_LABEL = os.environ.get("DEPLOY_LABEL", "").strip()
 
 OTE_LEVELS = (0.618, 0.705, 0.79)
 
+# ── Supabase (Fase 3: guardar cada señal, además de mandarla a Telegram) ────
+# Usa la clave SECRETA (service_role), no la pública — este bot corre en un
+# servidor de confianza (Render), no en el navegador de un cliente. Si estas
+# 2 variables no están configuradas, el bot simplemente no guarda nada en
+# Supabase y sigue funcionando igual que antes (no rompe nada).
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+BOT_NAME = "acciones"  # debe coincidir con el check constraint de "bot" en la tabla senales
+
+
+def guardar_senal_supabase(symbol: str, report) -> None:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+    tp = report.trade_plan
+    if tp is None:
+        return
+    direccion = "long" if report.bias == "alcista" else "short"
+    entrada = (tp.entry_low + tp.entry_high) / 2
+    payload = {
+        "bot": BOT_NAME,
+        "simbolo": symbol,
+        "direccion": direccion,
+        "entrada": entrada,
+        "stop_loss": tp.stop_loss,
+        "tp1": tp.take_profit_1,
+        "tp2": tp.take_profit_2,
+        "tp3": tp.take_profit_3,
+        "confianza": report.confidence,
+    }
+    try:
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/senales",
+            json=payload,
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            timeout=15,
+        )
+        if resp.status_code >= 300:
+            print(f"[Aviso] No se pudo guardar la señal de {symbol} en Supabase: {resp.status_code} {resp.text}")
+    except Exception as exc:
+        print(f"[Aviso] Error guardando señal de {symbol} en Supabase: {exc}")
+
 ANALYST_PERSONA = """
 Eres Nathaniel Ridge, analista principal de Ridgecrest Equities, trader institucional y analista de finanzas con
 más de 20 años de experiencia en mercados financieros. Eres especialista de alto nivel en Smart Money Concepts
@@ -935,7 +981,7 @@ def send_telegram_message(text: str) -> None:
 # ==============================================================================
 # 11. CLI
 # ==============================================================================
-def analyze_symbol(symbol: str, interval: str, limit: int) -> str:
+def analyze_symbol(symbol: str, interval: str, limit: int):
     df = fetch_klines(symbol=symbol, interval=interval, limit=limit)
     atr = calculate_atr(df)
     min_body = atr * MIN_OB_BODY_ATR_MULT
@@ -947,16 +993,17 @@ def analyze_symbol(symbol: str, interval: str, limit: int) -> str:
     zones += find_fair_value_gaps(df)
     zones += find_liquidity_pools(swings)
     report = generate_signal(symbol, df, events, zones)
-    return render_template_report(report, interval)
+    return render_template_report(report, interval), report
 
 
 def run_once(symbols: List[str], interval: str, limit: int, use_telegram: bool) -> None:
     for i, symbol in enumerate(symbols):
         try:
-            text = analyze_symbol(symbol, interval, limit)
+            text, report = analyze_symbol(symbol, interval, limit)
             print(text)
             if use_telegram:
                 send_telegram_message(text)
+            guardar_senal_supabase(symbol, report)
         except Exception as exc:
             print(f"[Error analizando {symbol}] {exc}")
         if i < len(symbols) - 1:
