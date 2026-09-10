@@ -332,6 +332,36 @@ def _construir_detalle(report) -> dict:
     }
 
 
+def enviar_latido() -> None:
+    """Punto 1 (agregado a pedido del usuario): deja constancia de que este
+    bot completó un ciclo, para que ridgecrest-pagos pueda avisar si algún
+    bot deja de correr sin que nadie se entere hasta que un cliente se
+    queje."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+    try:
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/heartbeats",
+            json={
+                "bot": BOT_NAME,
+                "ultima_corrida": datetime.now(timezone.utc).isoformat(),
+                "aviso_enviado": False,
+            },
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates",
+            },
+            params={"on_conflict": "bot"},
+            timeout=15,
+        )
+        if resp.status_code >= 300:
+            print(f"[Aviso] No se pudo actualizar el latido: {resp.status_code} {resp.text}")
+    except Exception as exc:
+        print(f"[Aviso] Error actualizando el latido: {exc}")
+
+
 def guardar_senal_supabase(symbol: str, report, audio_url=None) -> None:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return
@@ -1179,6 +1209,7 @@ def run_once(symbols: List[str], interval: str, limit: int, use_telegram: bool) 
             print(f"[Error analizando {symbol}] {exc}")
         if i < len(symbols) - 1:
             time.sleep(API_CALL_DELAY_SECONDS)
+    enviar_latido()
 
 
 def seconds_until_next_aligned_run(watch_minutes: int) -> float:
